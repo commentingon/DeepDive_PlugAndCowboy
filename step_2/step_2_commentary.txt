@@ -1,0 +1,1160 @@
+We finished our in-depth investigation of the `hello world` example for Plug with the following line of code:
+
+```
+apply(:cowboy, :"start_http", [PlugPlay.HTTP, 100, [port: 4000], [env: [dispatch: [{:_, [], [{:_, [], Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]}] ], compress: false]])
+```
+
+The `apply/3` function is a part of the `Kernel` module in Elixir; the docs are [here](http://elixir-lang.org/docs/stable/elixir/Kernel.html#apply/3). It is simply invoking a given function. In this case, `apply/3` is invoking the `start_http` function which is part of the `:cowboy` module and a list of arguments are getting passed in. Without prior knowledge of Cowboy, it is hard to understand the inner workings of the function. Hence, we will now spend some time devoted to Cowboy.
+
+Cowboy says that following about itself: 
+
+```
+Cowboy is a small, fast and modular HTTP server written in Erlang.
+
+Cowboy aims to provide a complete HTTP stack, including its derivatives SPDY, Websocket and REST. Cowboy currently supports HTTP/1.0, HTTP/1.1, Websocket (all implemented drafts + standard) and Webmachine-based REST.
+```
+
+Loïc Hoguin is the creator and maintainer of Cowboy. His primary goal with the project seems to be building an HTTP server that takes the best of Webmachine and makes it even better while including all the necessary components for the latest web technologies. I am definitely not a Erlang expert, but Cowboy appears to be a well written library that has quite a lot of functionality. In addition, it has some impressive performance statistics. Hence, even if we were not learning Cowboy for the sake of better understanding Plug, it is still a web server that is well worth knowing about and using.
+
+In step 2 of our walk-through, I've essentially rebuilt the same `Hello World` program in Cowboy. We will start by looking at the entry point for the program:
+
+```
+defmodule PlugPlay.CowboyHelloWorld do
+	
+	def run do
+		:cowboy.start_http(:http, 100, [port: 4000], [env: [dispatch: compile_dispatch_rules()]])
+	end
+
+	def compile_dispatch_rules do
+		dispatch_rules |> :cowboy_router.compile
+	end
+
+	def dispatch_rules do
+		[
+			{:_, [
+				{"/", CowboyHelloWorld.Handler, []}
+			]}
+		]
+	end
+end
+```
+
+I don't know about you but I'm already starting to seem some interesting similarities to what we were doing in Plug. The last line of code that we end with for the Plug `Hello World` example is essentially the same thing as our first lines of code here:
+
+```
+
+:cowboy.start_http(:http, 100, [port: 4000], [env: [dispatch: compile_dispatch_rules()]])
+
+```
+
+It doesn't take too much imagination to realize that the `:cowboy.start_http/4` spins up a server. Let's look at the code, which is found at https://github.com/ninenines/cowboy/blob/master/src/cowboy.erl, to better see what is going on here:
+
+```
+-spec start_http(ranch:ref(), non_neg_integer(), ranch_tcp:opts(), cowboy_protocol:opts()) -> {ok, pid()} | {error, any()}.
+
+start_http(Ref, NbAcceptors, TransOpts, ProtoOpts)
+		when is_integer(NbAcceptors), NbAcceptors > 0 ->
+	ranch:start_listener(Ref, NbAcceptors, ranch_tcp, TransOpts, cowboy_protocol, ProtoOpts).
+
+```
+
+The first thing to look at is the `spec` for the `start_http/4` function. The spec will give us a hint as to what this function is expecting for input and what we can expect for output. As a side note, one of the advantages of functional programming is have strict definitions around what goes into a function and what comes out. We should be confident that whenever we pass something of the correct type into a function, we will always get the output that we are expecting. What Erlang does not require static-type language like Haskell, we still have many resources for ensuring that we are using the proper types for a given function. The `spec` is one way of doing this. The `spec` is first and foremost for human users not for the machine. However, it is wise to use type specifications whenever possible. It will make it far easier for others who might eventually read your code. In addition, my feeling is that it would be very useful as a design principle.
+
+The `spec` for the `start_http/4` function indicates that the first argument is of type `ranch:ref()`. In fact, if we dig into the Ranch code we realize that the `ref()` type can be anything; we find the code here https://github.com/ninenines/ranch/blob/master/src/ranch.erl and it says:
+
+```
+-type ref() :: any().
+-export_type([ref/0]).
+```
+
+An interesting note in this case is the `-export_type/1` function that is being called. In other words, we are making this type available elsewhere. Hence, as long as we have Ranch loaded as a dependency, we can use the `ranch:ref()` type in our code. This is just what we find in Cowboy with the `start_http/4` function shown above. Had Ranch not called the `-export_type/1` function for the `ref()` type, we wouldn't be able to use it like we are in Cowboy or elsewhere. The same goes for two other types in our `start_http/4` function, `ranch_tcp:opts()` and `cowboy_protocol:opts()`. There is nothing mysterious about these types. Ultimately, you just have to go the code or documentation to find out what those types should look like. In the case the of `ranch:ref()` type we realize that it will allow anything in for our first argument, as far as type is concerned. For the other two types we find more information about them at the following locations:
+
+`ranch_tcp:opts()`: https://github.com/ninenines/ranch/blob/master/src/ranch_tcp.erl
+`cowboy_protocol:opts()`: https://github.com/ninenines/cowboy/blob/master/src/cowboy_protocol.erl
+
+I don't want to spend too much time on this, but looking at the type definitions can be particularly useful for better understand the options that we can pass into a function. In other words, Cowboy and Ranch are very good examples of how type definitions can be really useful in Erlang and Elixir. We see the following for `ranch_tcp:opts()`:
+
+```
+-type opts() :: [{backlog, non_neg_integer()}
+	| {ip, inet:ip_address()}
+	| {linger, {boolean(), non_neg_integer()}}
+	| {nodelay, boolean()}
+	| {port, inet:port_number()}
+	| {raw, non_neg_integer(), non_neg_integer(),
+		non_neg_integer() | binary()}
+	| {send_timeout, timeout()}
+	| {send_timeout_close, boolean()}].
+-export_type([opts/0]).
+```
+
+For `cowboy_protocol:opts()` we see the following:
+
+```
+-type opts() :: [{compress, boolean()}
+	| {env, cowboy_middleware:env()}
+	| {max_empty_lines, non_neg_integer()}
+	| {max_header_name_length, non_neg_integer()}
+	| {max_header_value_length, non_neg_integer()}
+	| {max_headers, non_neg_integer()}
+	| {max_keepalive, non_neg_integer()}
+	| {max_request_line_length, non_neg_integer()}
+	| {middlewares, [module()]}
+	| {onresponse, cowboy:onresponse_fun()}
+	| {timeout, timeout()}].
+-export_type([opts/0]).  
+```
+
+If you are like me, not knowing all the choices for options that I can pass into a function is really annoying. I can't tell you how many hours of my life I've wasted trying to track down what options are available for classes or methods in many large Ruby libraries. Unfortunately, documentation is often one of the last tasks to cover when it comes to building open sources projects. It is understandable, but frustrating. When done well, Erlang and Elixir type definitions can be very useful. This is a good example.
+
+For `ranch_tcp:opts()` we have the following options that we can pass in: `ip`, `linger`, `nodelay`, `port`, `raw`, `send_timeout` and `send_timeout_close`. 
+
+For `cowboy_protocol:opts()` we have the following options: `compress`, `env`, `max_empty_lines`, `max_header_name_length`, `max_header_value_length`, `max_headers`, max_keepalive`, `max_request_line_length`, `middlewares`, `onresponse` and `timeout`. 
+
+If the need arises during the course of out investigation, we will try to find out more about each of these options. Of course, the second argument that we are passing into the `start_http/4` function is a `non_neg_integer()` type, which is a standard part of Erlang and Elixir's type system. In our particular case, we aren't passing many options into the `start_http/4` function. We can easily deduce from the type definitions that we are starting a `tcp` listener on `port 4000` and we are defining an `env` option for the `cowboy_protocol`. It is really in the `env` option that we are inputting the meat and potatoes of our program. Hence, it is there that we will move next. 
+
+I should say that I have decided to not dig deeper into Ranch at the moment. If I felt as though is was necessary to understand in order to better utilize Cowboy and Plug, I would continue diving deeper. However, at the moment, I don't think it is important to understand more deeply. Granted, I might be wrong. I might be missing a major piece of the puzzle. But, my intuition tells me that digging deeper into Ranch is chasing the wrong rabbit down the wrong hole. There is certainly interesting things to learn by diving deeper into Ranch. But, simply scanning the name of the Ranch function, `start_listener/6`, makes me feel as though I understand what is going on. Thus, part of my technique when investigating new libraries is to go as deep as I feel is necessary until there isn't anymore mystery. When a function call seems too magical for my taste, I dig deeper. When I get the feeling that I've hit the bottom of the magic ride, I stop and shift focus. That is what I have chosen to do in this case.
+
+When looking at the `env` option is the `cowboy_protocol:opts()` type definition, we see that it is expecting a type of `cowboy_middleware:env()`. So, let's check that out. Interestingly enough, the `cowboy_middleware:env()` definition seems to be lacking the same level of specification that the other definitions had (https://github.com/ninenines/cowboy/blob/master/src/cowboy_middleware.erl):
+
+```
+-module(cowboy_middleware).
+
+-type env() :: [{atom(), any()}].
+-export_type([env/0]).
+
+-callback execute(Req, Env)
+	-> {ok, Req, Env}
+	| {suspend, module(), atom(), [any()]}
+	| {stop, Req}
+	when Req::cowboy_req:req(), Env::env().
+```
+
+Apparently, the `env` options is pretty wide-open. In our case we are passing in the following:
+
+```
+[env: [dispatch: compile_dispatch_rules()]]
+```
+
+Hence, we are at least certain the we are conforming the type definition in the sense that we are passing in a tuple with an `atom()` (i.e. `:dispatch`) and something else that is of `any()` type (i.e. `compile_dispatch_rules/0`). I have included the `-callback` function definition that is in the `cowboy_middleware` module because I have the feeling that it is going to reappear somewhere else. In Erlang, the `-callback` definition means that we need to have an `execute/2` function somewhere when we use the `cowboy_middleware` module. Thus, I'm expecting it to come into play at some point.
+
+we read in the cowboy documentation that a `env` variable in the `cowboy_middleware` module is created for every request that comes in (http://ninenines.eu/docs/en/cowboy/1.0/manual/cowboy_middleware/). i don't think it is worth going into here because it would take a while to walk through it all, but part of the ranch portion of the program starts up numerous different processes that handle connections to the server. one of those processes is a `gen_server` that maintains the state of the options passed into the server (e.g. https://github.com/ninenines/ranch/blob/master/src/ranch_server.erl). this is the final destination of our `env` option; we can then update it is we need to for any reason. another process is then started (e.g. `ranch_conns_sup`) which runs the loop that listens for connections and controls the flow of the server (e.g. https://github.com/ninenines/ranch/blob/master/src/ranch_conns_sup.erl). within the `ranch_conns_sup` process, the `cowboy_protocol` module is started and the `env` options are passed into the `cowboy_protocol` along with a number of other arguments. it is within the `cowboy_protocol` module that much of cowboy's heart is really contained. in fact, this is where we find the `execute/2` function that is required by the `cowboy_middleware` module.
+
+We will arrive back at the `execute/2` function a little later. At present, we will start with the beginning of the `cowboy_protocol` module. In Ranch, we call the `cowboy_protocol:start_link/4` function as part of the loop that listens for connections. This function can be found at the top of the `cowboy_protocol` function:
+
+```
+-spec start_link(ranch:ref(), inet:socket(), module(), opts()) -> {ok, pid()}.
+start_link(Ref, Socket, Transport, Opts) ->
+	Pid = spawn_link(?MODULE, init, [Ref, Socket, Transport, Opts]),
+	{ok, Pid}.
+```
+
+This function is doing little more than spawning a process for the `init/4` function. The `cowboy_protocol:init/4` function is rather straightforward. It sets the stage for parsing the requests that come into the listener that Ranch has set up. I'm not going to go through the parsing of a request. What I'm most interested in knowing is how the `env` option fits into the puzzle. If we need to learn more about the parsing process later, than I will do so. However, it is unnecessary for the moment. However, what we do need to look at is the `init/4` function. The chief part of the function is building a large record that contains all of the state a given connection. It is within this record that we are able to pick up the thread of our `env` option:
+
+```
+init(Ref, Socket, Transport, Opts) ->
+	Compress = get_value(compress, Opts, false),
+	MaxEmptyLines = get_value(max_empty_lines, Opts, 5),
+	MaxHeaderNameLength = get_value(max_header_name_length, Opts, 64),
+	MaxHeaderValueLength = get_value(max_header_value_length, Opts, 4096),
+	MaxHeaders = get_value(max_headers, Opts, 100),
+	MaxKeepalive = get_value(max_keepalive, Opts, 100),
+	MaxRequestLineLength = get_value(max_request_line_length, Opts, 4096),
+	Middlewares = get_value(middlewares, Opts, [cowboy_router, cowboy_handler]),
+	Env = [{listener, Ref}|get_value(env, Opts, [])],
+	OnResponse = get_value(onresponse, Opts, undefined),
+	Timeout = get_value(timeout, Opts, 5000),
+	ok = ranch:accept_ack(Ref),
+	wait_request(<<>>, #state{socket=Socket, transport=Transport,
+		middlewares=Middlewares, compress=Compress, env=Env,
+		max_empty_lines=MaxEmptyLines, max_keepalive=MaxKeepalive,
+		max_request_line_length=MaxRequestLineLength,
+		max_header_name_length=MaxHeaderNameLength,
+		max_header_value_length=MaxHeaderValueLength, max_headers=MaxHeaders,
+		onresponse=OnResponse, timeout=Timeout, until=until(Timeout)}, 0).
+```
+
+Our record looks like this:
+
+```
+-record(state, {
+	socket :: inet:socket(),
+	transport :: module(),
+	middlewares :: [module()],
+	compress :: boolean(),
+	env :: cowboy_middleware:env(),
+	onresponse = undefined :: undefined | cowboy:onresponse_fun(),
+	max_empty_lines :: non_neg_integer(),
+	req_keepalive = 1 :: non_neg_integer(),
+	max_keepalive :: non_neg_integer(),
+	max_request_line_length :: non_neg_integer(),
+	max_header_name_length :: non_neg_integer(),
+	max_header_value_length :: non_neg_integer(),
+	max_headers :: non_neg_integer(),
+	timeout :: timeout(),
+	until :: non_neg_integer() | infinity
+}).
+```
+
+Notice how we here find our `env` option. The `init/4` function is either setting default values for each of the elements in the `#state{}` record or it is getting the values that were set in the `ranch_server` module with an `ets` table`. In the case of the `env` option, we are setting it to the `Env` attribute in the `#state{}` record. In other words, I think that we will end up with something like the following:
+
+```
+#state{env: [dispatch: compile_dispatch_rules()]}
+```
+
+Without going through every step of the parsing process, the next place that we see this come up in the `cowboy_protocol` module is in the `execute/2` function. Below is the code that pertains to our current investigation:
+
+```
+-spec execute(cowboy_req:req(), #state{}) -> ok.
+execute(Req, State=#state{middlewares=Middlewares, env=Env}) ->
+	execute(Req, State, Env, Middlewares).
+
+-spec execute(cowboy_req:req(), #state{}, cowboy_middleware:env(), [module()])
+	-> ok.
+execute(Req, State, Env, []) ->
+	next_request(Req, State, get_value(result, Env, ok));
+execute(Req, State, Env, [Middleware|Tail]) ->
+	case Middleware:execute(Req, Env) of
+		{ok, Req2, Env2} ->
+			execute(Req2, State, Env2, Tail);
+		{suspend, Module, Function, Args} ->
+			erlang:hibernate(?MODULE, resume,
+				[State, Env, Tail, Module, Function, Args]);
+		{stop, Req2} ->
+			next_request(Req2, State, ok)
+	end.
+```
+
+My initial impression was that this first `execute/2` function would not match the callback requirement in the `cowboy_middleware` module. However, after a little bit of searching and reading through the documentation on records (http://erlang.org/doc/reference_manual/records.html), it appears as though records will be represented as follows after compilation:
+
+```
+[RecordName, {atom(), any()}]
+```
+
+In other words, I'm left wondering whether the `state` record will be a suitable match for the `env()` type definition in the `cowboy_middleware` module. If that is the case, then the `execute/2` function that we have here would likely be the expected behaviour from that module. That being said, I don't see the `-behaviour(cowboy_middleware).` anywhere in the `cowboy_protocol` module. Thus, in the end I must conclude that my initial assumption was wrong and we haven't yet found where the `cowboy_protocol:execute/2` comes into play. However, we have another candidate in our sights.
+
+As we see from the `execute/2` function shown above, it is little more than a wrapper around the `execute/4` function. When we look at the `execute/4` function we notice very quickly that there are 2 possible matches and it looks like we are expecting to work with a list of `Middlewares` and the first `execute/4` function, which is matching an empty list in the fourth argument position, is the exit point for a recursive function. The part that interests us at the moment is the second `execute/4` function definition. Just to make sure that we are talking about the same thing, here is the code:
+
+```
+execute(Req, State, Env, [Middleware|Tail]) ->
+	case Middleware:execute(Req, Env) of
+		{ok, Req2, Env2} ->
+			execute(Req2, State, Env2, Tail);
+		{suspend, Module, Function, Args} ->
+			erlang:hibernate(?MODULE, resume,
+				[State, Env, Tail, Module, Function, Args]);
+		{stop, Req2} ->
+			next_request(Req2, State, ok)
+	end.
+```
+
+This is starting to look interesting. Notice how we see a `Middleware:execute/2` function in this function. This functions 2 arguments (i.e. `Req` and `Env`) seem to match what we are expecting for the `cowboy_middleware` callback of `execute/2`. So, what is this list of `Middlewares` that are getting passed into the `execute/4` function?
+
+If we look back at the `init/4` function, we will notice that `Middlewares` is one of the items that we are setting in the in the `#state{}` record. In our current case, we don't have any additional `Middlewares` to add to the list. Thus, `state.middlewares` attribute will contain the defaults of `cowboy_router` and `cowboy_handler`, which we see in the `init/4` function. In other words, our first iteration through the `execute/4` function in the `cowboy_protocol` module will be `cowboy_router`. We will have something like the following:
+
+```
+cowboy_router:execute(Req, [{:dispatch, compile_dispatch_rules()}])
+```
+
+In fact, here we are finally at the root of seeing where the `dispatch` options in the `env` option comes into play. In fact, that is a significant moment. As we will see as we continue to expand the `dispatch_rules` that we are passing into the `dispatch` option, this is a critical portion of Cowboy. 
+
+In fact, when we look at the `cowboy_router` module, guess what we find at the top of the page:
+
+```
+-behaviour(cowboy_middleware).
+```
+
+At last, we have found where our callback comes into play! So, now lets turn to the `execute/2` function that we have finally found. Here is the code:
+
+```
+-spec execute(Req, Env)
+	-> {ok, Req, Env} | {stop, Req}
+	when Req::cowboy_req:req(), Env::cowboy_middleware:env().
+execute(Req, Env) ->
+	{_, Dispatch} = lists:keyfind(dispatch, 1, Env),
+	Host = cowboy_req:host(Req),
+	Path = cowboy_req:path(Req),
+	case match(Dispatch, Host, Path) of
+		{ok, Handler, HandlerOpts, Bindings, HostInfo, PathInfo} ->
+			Req2 = cowboy_req:set_bindings(HostInfo, PathInfo, Bindings, Req),
+			{ok, Req2, [{handler, Handler}, {handler_opts, HandlerOpts}|Env]};
+		{error, notfound, host} ->
+			{stop, cowboy_req:reply(400, Req)};
+		{error, badrequest, path} ->
+			{stop, cowboy_req:reply(400, Req)};
+		{error, notfound, path} ->
+			{stop, cowboy_req:reply(404, Req)}
+	end.
+```
+
+Finally!! We see the light at the end of the tunnel!! The first line in the `cowboy_router:execute/2` function is where we are grabbing the `dispatch` option!! In other words, the final element from our original `cowboy:start_http/4` function call is starting to fall into place.
+
+We see in the `cowboy_router:execute/2` function that we are getting the `dispatch` key from the `Env` variable, which was passed in as the `state.env` attribute:
+
+```
+{_, Dispatch} = lists:keyfind(dispatch, 1, Env)
+```
+
+Cowboy is also parsing the `request` that has come into the server in order to find the `host` and `path` from the request:
+
+```
+Host = cowboy_req:host(Req),
+Path = cowboy_req:path(Req)
+```
+
+The `Dispatch`, `Host` and `Path` variables are then passed into the `match/3` function and we take the next steps in the program based on the response from the `match/3` function. Just looking at the different cases for the `match/3` function gives us some hint that we have arrived at an interesting place:
+
+```
+case match(Dispatch, Host, Path) of
+	{ok, Handler, HandlerOpts, Bindings, HostInfo, PathInfo} ->
+		Req2 = cowboy_req:set_bindings(HostInfo, PathInfo, Bindings, Req),
+		{ok, Req2, [{handler, Handler}, {handler_opts, HandlerOpts}|Env]};
+	{error, notfound, host} ->
+		{stop, cowboy_req:reply(400, Req)};
+	{error, badrequest, path} ->
+		{stop, cowboy_req:reply(400, Req)};
+	{error, notfound, path} ->
+		{stop, cowboy_req:reply(404, Req)}
+end.
+```
+
+Fundamentally, we are tearing apart each portion of the routes that we pass into the `match/3` function via the `Dispatch` variable. I won't go any deeper into the process of actually dissecting the `Dispatch`, `Host` and `Path` arguments in the `match/3` function. We can actually see the results that we are expecting. If we don't get back something that matches the following pattern, we get an error:
+
+```
+{ok, Handler, HandlerOpts, Bindings, HostInfo, PathInfo}
+```
+
+The interesting thing is that we are then taking that result of the `match/3` function and passing it into the `cowboy_protocol:execute/4` function. In other words, the output of the `cowboy_router:match/4` function, if everything is properly built, will be the above tuple. This tuple is then transformed into the following:
+
+```
+{ok, Req2, [{handler, Handler}, {handler_opts, HandlerOpts} | Env]}
+```
+
+That output is then taken and matches the first case in the `cowboy_protocol:execute/4` function:
+
+```
+case Middleware:execute(Req, Env) of
+	{ok, Req2, Env2} ->
+		execute(Req2, State, Env2, Tail);
+	.
+	.
+end
+```
+
+As we can see, the `cowboy_protocol:execute/4` function is a recursive function. We are essentially iterating over the various middleware elements that are needed for the particular functionality that we are looking for within Cowboy. However, we change the `Req` and the `Env` variables before passing them off to the next piece of middleware. In this case, we were running the `Req` and `Env` variables through the `cowboy_router:execute/2` function. Given that our current example only has the default middleware, we would now move on to the `cowboy_handler` module. But, we are now passing a transformed `Env` variable into the `cowboy_handler:execute/2` function; the new `Env` variable has additional tuples for the `handler` and `handler_opts` options. These were set by tearing apart the `dispatch` option that we passed into the `env` option. If we go back to our original module, `PlugPlay.CowboyHelloWorld`, we will see the following for the data that we were passing into the `dispatch` option:
+
+```
+def compiled_dispatch_rules do
+	dispatch_rules |> :cowboy_router.compile
+end
+
+def dispatch_rules do
+	[
+		{:_, [
+			{"/", CowboyHelloWorld.Handler, []}
+		]}
+	]
+end
+```
+ 
+From all of the examples that I have looked at for Cowboy, the contents of our `PlugPlay.CowboyHelloWorld.dispatch_rules/0` function seems to be a critical piece of the program. Yet, I have to admit that I find the documentation around this vital part of Cowboy a little lacking. We are essentially defining the routes for our server. The Cowboy documentation provides an intro to the matter here: http://ninenines.eu/docs/en/cowboy/1.0/guide/routing/. However, after reading the documentation through a couple of times, I still didn't feel as though all the manners of using routing and the `dispatch` option was clear.
+
+As a side note, I'm sure that part of the difficulty in understanding how Cowboy's routing syntax works is related to my experience with frameworks. As with many developers working on web apps, I spend most of my time in Ruby on Rails. Hence, I've grown very used to following conventions. While I have always had a superficially knowledge of what was going on deeper in the bowels of Rails, Rack and server like Unicorn or Thin, my life is spent in higher layers of abstraction. Thus, the nitty-gritty details are hidden from me and they become mysterious. This is the danger of spending too much time in a higher-level language or in frameworks.
+
+After playing with the examples that are in the Cowboy code on Github (https://github.com/ninenines/cowboy/tree/master/examples), I started to get a better idea of how the practical matches up to the conceptual, as documented in the Cowboy guide on routing. The router is at the core of any web server or application. We have to tell the server what to do with a given request. The `dispatch_rules` that you feed into the `dispacth` option in the `env` option are the list of routes against which each request is matched.
+
+Since we have already looked at the `cowboy_router:execute/2` function and briefly mentioned the `cowboy_router:match/3`, we will know that we are matching 2 things with each request: `Host` and `Path`:
+
+```
+match(Dispatch, Host, Path)
+```
+
+The host match and the path match make up the two major criteria for routing a request. These two parts make up the heart of the `dispatch_rules`. The dispatch rules are a list of tuples whose make is as follows:
+
+```
+{Host Match, [ List of path matches for that host ]}
+```
+
+Our only route for this simple hello world example is the following:
+
+```
+{:_, [
+	{"/", CowboyHelloWorld.Handler, []}
+]}
+
+```
+
+The first thing that the `cowboy_router:match/3` function is looking for is the `Host`. In our example the `Host` is `:_`. In this particular example, the `cowboy_router:match/3` function tells us that there are no constraints for the `Host` and we  can move directly to matching the `Path`:
+
+```
+match([{'_', [], PathMatchs}|_Tail], _, Path) ->
+	match_path(PathMatchs, undefined, Path, []);
+```
+
+The `:_` in the `Host` will match anything. In a practical sense, if we are looking for `www.mysite.com`, it  would match our `Host` just as much as `mysubdomain.mysite.com`. In the case that we want to match specific activity to these two hosts, we would write the following:
+
+```
+[
+	{"www.mysite.com", [
+		{"/", CowboyHelloWorld.WWWHandler, []}
+	]},
+	{"mysubdomain.mysite.com", [
+		{"/", CowboyHelloWorld.MySubdomainHandler, []}
+	]}
+]
+``` 
+
+As with any other pattern matching situation in Erlang and Elixir, we could still have a catchall as a last resort in case the incoming request didn't match either of those hosts. We would have the following:
+
+```
+[
+	{"www.mysite.com", [
+		{"/", CowboyHelloWorld.WWWHandler, []}
+	]},
+	{"mysubdomain.mysite.com", [
+		{"/", CowboyHelloWorld.MySubdomainHandler, []}
+	]},
+	{:_, [
+		{"/", CowboyHelloWorld.Handler, []}
+	]}
+]
+```
+
+The next portion of the puzzle is matching the `Path`. The paths are determined by the inner tuple. Each `Host` can have many different `Path` definitions. If you are familiar with Ruby on Rails, theses are similar to the `config/routes.rb` file. We need to tell the web server what to do with each request that comes in. First, we determine the host and then we get narrower and determine the specific activity that we want to carry out.
+
+In our above code snippet, these are the `Host` definitions:
+
+```
+[
+	{"www.mysite.com", [
+		.
+		.
+		.
+	]},
+	{"mysubdomain.mysite.com", [
+		.
+		.
+		.
+	]},
+	{:_, [
+		.
+		.
+		.
+	]}
+]
+```
+
+And, these are the `Path` definitions:
+
+```
+[
+	...
+		{"/", CowboyHelloWorld.WWWHandler, []}
+	...
+	...
+		{"/", CowboyHelloWorld.MySubdomainHandler, []}
+	...
+	...
+		{"/", CowboyHelloWorld.Handler, []}
+	...
+]
+```
+
+This is the most basic type of `Path` definition. As we progress, we will see more variations. Each of these `Path` definitions is a tuple with 3 elements. When processing these `Path` definitions, the `cowboy_router` module is matching the incoming request to the various `Path` definitions within the `Host` definition that has already been matched. The `match_path/4` function looks like this:
+
+```
+-spec match_path([dispatch_path()],
+	HostInfo::undefined | tokens(), binary() | tokens(), bindings())
+	-> {ok, module(), any(), bindings(),
+		HostInfo::undefined | tokens(),
+		PathInfo::undefined | tokens()}
+	| {error, notfound, path} | {error, badrequest, path}.
+match_path([], _, _, _) ->
+	{error, notfound, path};
+%% If the path is '_' then there can be no constraints.
+match_path([{'_', [], Handler, Opts}|_Tail], HostInfo, _, Bindings) ->
+	{ok, Handler, Opts, Bindings, HostInfo, undefined};
+match_path([{<<"*">>, _, Handler, Opts}|_Tail], HostInfo, <<"*">>, Bindings) ->
+	{ok, Handler, Opts, Bindings, HostInfo, undefined};
+match_path([{PathMatch, Fields, Handler, Opts}|Tail], HostInfo, Tokens,
+		Bindings) when is_list(Tokens) ->
+	case list_match(Tokens, PathMatch, Bindings) of
+		false ->
+			match_path(Tail, HostInfo, Tokens, Bindings);
+		{true, PathBinds, PathInfo} ->
+			case check_constraints(Fields, PathBinds) of
+				{ok, PathBinds2} ->
+					{ok, Handler, Opts, PathBinds2, HostInfo, PathInfo};
+				nomatch ->
+					match_path(Tail, HostInfo, Tokens, Bindings)
+			end
+	end;
+match_path(_Dispatch, _HostInfo, badrequest, _Bindings) ->
+	{error, badrequest, path};
+match_path(Dispatch, HostInfo, Path, Bindings) ->
+	match_path(Dispatch, HostInfo, split_path(Path), Bindings).
+
+```
+
+The first argument is the path information for the incoming request. The third argument is the `Path` definitions that we have defined in the `dispatch_rules/0` function. By looking at the return values and the specs, we get a sense for what the goal of this function is:
+
+```
+{ok, module(), any(), bindings(),
+		HostInfo::undefined | tokens(),
+		PathInfo::undefined | tokens()}
+.
+.
+.
+{ok, Handler, Opts, Bindings, HostInfo, undefined};
+.
+.
+.
+{ok, Handler, Opts, Bindings, HostInfo, undefined};
+.
+.
+.
+{ok, Handler, Opts, PathBinds2, HostInfo, PathInfo};
+.
+.
+.
+```
+
+The `match_path/4` function appears to be seeking a missing piece of information. The key missing piece of information is the `Handler`. The request arrives at the server with path information. Now, it needs to know what to do with that `Path`. The `match_path/4` function's goal is to give it a `Handler`. The `Handler` will take care of actually completing the task at hand. 
+
+Getting the `Handler` is the chief goal of the first stage of the request parsing. Then, we pass that information back to the `execute/4` function in the `cowboy_protocol` module. Here is a reminder of what that function looks like:
+
+```
+execute(Req, State, Env, [Middleware|Tail]) ->
+	case Middleware:execute(Req, Env) of
+		{ok, Req2, Env2} ->
+			execute(Req2, State, Env2, Tail);
+		{suspend, Module, Function, Args} ->
+			erlang:hibernate(?MODULE, resume,
+				[State, Env, Tail, Module, Function, Args]);
+		{stop, Req2} ->
+			next_request(Req2, State, ok)
+	end.
+```
+
+The first `Middleware` that we ran through the `execute/2` callback required by the `cowboy_middleware` behaviour was the `cowboy_router:execute/2` function. If we look back at our default values for the `state.middleware` attribute, we see the following:
+
+
+Middlewares = get_value(middlewares, Opts, [cowboy_router, cowboy_handler])
+```
+
+The `cowboy_protocol:execute/4` function will run recursively over this list of `Middlewares`. Thus, our next `Middleware` to execute will be `cowboy_handler`. This is great news! We just received back a `Handler` from our route matching. It seems like curious timing! We will see why.
+
+The result of the route matching follows this format:
+
+```
+{ok, Req2, [{handler, Handler}, {handler_opts, HandlerOpts} | Env]};
+```
+
+This is what `cowboy_router:execute/2` will return. This will match the following clause in the `case` statement::
+
+```
+{ok, Req2, Env2} ->
+	execute(Req2, State, Env2, Tail);
+```
+
+We are recursively calling the `cowboy_protocol:execute/4`, but we are passing in new `Req` and `Env` variables. These have been updated with the `Handler` and `HandlerOpts` from matching the `Path` and `Host` from the request. Now, we move on to doing something with all of the results that we have been building.
+
+Since we are recursively calling the `cowboy_protocol:execute/4` function, we end back up at the following lines:
+
+```
+case Middleware:execute(Req, Env) of
+	{ok, Req2, Env2} ->
+		execute(Req2, State, Env2, Tail);
+	{suspend, Module, Function, Args} ->
+		erlang:hibernate(?MODULE, resume,
+			[State, Env, Tail, Module, Function, Args]);
+	{stop, Req2} ->
+		next_request(Req2, State, ok)
+end.
+```  
+
+This time, the `Middleware` variable is `cowboy_handler`. Hence, our next stop is the `cowboy_handler` module. Once again, we find a `behaviour` statement at the top of the page:
+
+```
+-behaviour(cowboy_middleware).
+```
+
+Thus, we know that there must be an `execute/2` function somewhere in the module and it must take a request as a first argument and a `cowboy_middleware:env()`-type variable as a second argument. We find the function near the top of the file:
+
+```
+-spec execute(Req, Env) -> {ok, Req, Env}
+	when Req::cowboy_req:req(), Env::cowboy_middleware:env().
+execute(Req, Env) ->
+	{_, Handler} = lists:keyfind(handler, 1, Env),
+	{_, HandlerOpts} = lists:keyfind(handler_opts, 1, Env),
+	try Handler:init(Req, HandlerOpts) of
+		{ok, Req2, State} ->
+			Result = terminate(normal, Req2, State, Handler),
+			{ok, Req2, [{result, Result}|Env]};
+		{Mod, Req2, State} ->
+			Mod:upgrade(Req2, Env, Handler, State, infinity, run);
+		{Mod, Req2, State, hibernate} ->
+			Mod:upgrade(Req2, Env, Handler, State, infinity, hibernate);
+		{Mod, Req2, State, Timeout} ->
+			Mod:upgrade(Req2, Env, Handler, State, Timeout, run);
+		{Mod, Req2, State, Timeout, hibernate} ->
+			Mod:upgrade(Req2, Env, Handler, State, Timeout, hibernate)
+	catch Class:Reason ->
+		Stacktrace = erlang:get_stacktrace(),
+		cowboy_req:maybe_reply(Stacktrace, Req),
+		terminate({crash, Class, Reason}, Req, HandlerOpts, Handler),
+		erlang:Class([
+			{reason, Reason},
+			{mfa, {Handler, init, 2}},
+			{stacktrace, Stacktrace},
+			{req, cowboy_req:to_list(Req)},
+			{opts, HandlerOpts}
+		])
+	end.
+```
+
+This function is a requirement of the `cowboy_middleware` module and, hence, must have the pre-requisite types. They are defined in the `spec`. We are passing in the correct types. The `Req` and `Env` variable are the `Req2` and `Env2` that were built and returned from the `cowboy_router:execute/2` function.
+
+Right away we see that we are grabbing the `handler` and `handler_opts` attributes from the `Env` variable. We are then passing `Handler` and `HandlerOpts` variable into the `init/2` function for the handler in question. We only have one route and handler and we aren't passing any options into the handler:
+
+```
+{"/", CowboyHelloWorld.Handler, []}
+```
+
+Thus, we must need to have an `init/2 function in our `CowboyHelloWorld.Handler` module. Our `handler` looks like this:
+
+```
+defmodule CowboyHelloWorld.Handler do
+  def init(request, _options) do
+    reply = request |> build_reply
+    {:ok, reply, []}
+  end
+
+  def build_reply(request) do
+    :cowboy_req.reply(status_code(), headers(), body(), request) 
+  end
+
+  def status_code, do: 200
+  
+  def headers, do: [{"content-type", "text/plain"}]
+  
+  def body, do: "Hello World\n"
+end
+```
+
+I must mention that I am working off of the `HEAD` version of Cowboy. The version that is referenced in Plug as a dependency is version 1.0.0 whereas the `HEAD` version is a movement towards version 2.0.0. Thus, all the links to the Cowboy's Github page are to the `HEAD` version. Because Plug has `:cowboy ~>1.0.0` listed as dependency, you will have your `deps/0` function in `mix.exs` will have to look as follows:
+
+```
+defp deps do
+	[
+		{:cowboy, github: "ninenines/cowboy", override: true},
+		{:plug, "~> 0.9.0"}
+	]
+end
+```
+
+I will switch back to the 1.0.0 version of Cowboy when we go back to working with Plug. I don't want to introduce strange and frustrating differences. However, I don't want to dig into Cowboy version 1.0.0 when I know that the `HEAD` version has made a number of improvements over version 1.0.0. The difference does not change any of the fundamentals that we will be speaking of, from what I can tell.
+
+Now, back to the our `CowboyHelloWorld.Handler` module. 
+
+Part of any handler is an `init/2` function. Hence, if we look at the `cowboy_handler` module, we see the following:
+
+```
+-callback init(Req, any())
+	-> {ok | module(), Req, any()}
+	| {module(), Req, any(), hibernate}
+	| {module(), Req, any(), timeout()}
+	| {module(), Req, any(), timeout(), hibernate}
+	when Req::cowboy_req:req().
+```
+
+This `init/2` function is rather straight forward. There is no reason to over complicate it. Much of the complex activity going on in the background is before this point. The `Handler` is parsed and match to the request path. This same `Handler` module's `init/2` function is called here. In the `case` statement, we are expecting it to return a tuple with three elements, in the standard case.
+
+```
+{ok, Req2, State} ->
+	Result = terminate(normal, Req2, State, Handler),
+	{ok, Req2, [{result, Result}|Env]};
+```
+
+The request that is returned from the `init/2` function is going to be a `reply` to the incoming request. We see this is the `init/2` function that we defined in the `CowboyHelloWorld` module:
+
+```
+def init(request, options) do
+	reply = request |> build_reply
+	{:ok, reply, []}
+end
+```
+
+The third element in the returned tuple is the `state`. I think it is interesting that this is not being preserved anywhere. The first action that is carried out after the `CowboyHelloWorld.Handler.init/2` function returns is:
+
+```
+Result = terminate(normal, Req2, State, Handler),
+```
+
+However, if we look in the `terminate/4` function we see the following:
+
+```
+-spec terminate(any(), Req, any(), module()) -> ok when Req::cowboy_req:req().
+terminate(Reason, Req, State, Handler) ->
+	case erlang:function_exported(Handler, terminate, 3) of
+		true ->
+			try
+				Handler:terminate(Reason, cowboy_req:lock(Req), State)
+			catch Class:Reason2 ->
+				erlang:Class([
+					{reason, Reason2},
+					{mfa, {Handler, terminate, 3}},
+					{stacktrace, erlang:get_stacktrace()},
+					{req, cowboy_req:to_list(Req)},
+					{state, State},
+					{terminate_reason, Reason}
+				])
+			end;
+		false ->
+			ok
+	end.
+```
+
+This function is looking to see if the there is a `CowboyHelloWorld.Handler.terminate/3` function that is public facing:
+
+```
+case erlang:function_exported(Handler, terminate, 3) of
+ .
+ .
+ .
+end
+```
+
+In Elixir, there is no terminology for an `exported` function. Rather, private functions are labeled as such in Elixir. In Erlang, it is the reverse. Private function are left to their own devises and public functions are `exported`. Hence, all that `cowboy_handler.terminate/4` is asking is whether there is a non-private `terminate/3` function in the `CowboyHelloWorld.Handler` module. In our case, we are not defining a `terminate/3` function. However, I will certainly come back to the topic. I'm interested to find out whether we can maintain `state` from one request to the next and what that would mean. We are returning an empty `list` as the third element in the return tuple, but it looks as though it is not preserved in any manner. Hence, I'm really only doing it to illustrate that we could hypothetically return a `list` or a `map` or something else as the third element in the tuple.
+
+Because we don't have a `terminate/3` function defined in our `CowboyHelloWorld.Handler` module, we see that the above `case` statement will simple return `ok`. If we go back to the `init/2` function we see that `ok` is returned from the `terminate/4` function and bound to the `Result` variable. That `Result` variable is then prepended to that third element in the returned tuple from `init/2`. However, our `state` drops off into thin air. I guess it is good to know that we can't actually do anything with the `state` variable in this case. Hopefully, we will find its use sometime in a future example.
+
+```
+{ok, Req2, State} ->
+	Result = terminate(normal, Req2, State, Handler),
+	{ok, Req2, [{result, Result}|Env]};
+```
+
+So, now we can see that the key to our current `cowboy_handler:execute/2` function and the CowboyHelloWorld.Handler.init/2` function is the reply that is created. As with any HTTP request, a reply is expected. We will take a closer look at that now.
+
+In our example, the reply is quite simply. I have broken it up into a number of different functions for the sake of illustration:
+
+```
+  def build_reply(request) do
+    :cowboy_req.reply(status_code(), headers(), body(), request) 
+  end
+
+  def status_code, do: 200
+  
+  def headers, do: [{"content-type", "text/plain"}]
+  
+  def body, do: "Hello World\n"
+
+```
+
+One of the things that Cowboy does really well is model the structure of an HTTP request and response. I don't want to dwell on HTTP fundamentals here, it is not the best use of our time. There are many great resources that are already freely available. Here are a couple of options:
+
+[HTTP Basics](https://www3.ntu.edu.sg/home/ehchua/programming/webprogramming/HTTP_Basics.html)
+
+[Apache HTTP Fundamentals](http://hc.apache.org/httpcomponents-core-ga/tutorial/html/fundamentals.html)
+
+[HTTP Every Programmer Should Know](http://code.tutsplus.com/tutorials/http-the-protocol-every-web-developer-must-know-part-1--net-31177)
+
+To form a basic HTTP response, and a Cowboy reply, we need a couple of different components: a status code, headers and a body. Hence, I have separated them into individual functions. Each HTTP response needs a status code. The most common status code for a successful request is `200`. A list of status codes can be found with W3 here: [W3 HTTP Protocol Status Codes](http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html). In our case we return an integer with the value of `200`, which must be the first argument in the `cowboy_req:reply/4` function:
+
+```
+def status_code, do: 200
+```
+
+Next, we must include the response headers. In our case, we are only manually setting the `content-type` but we can set any number of other headers that we might want. Hopefully, we will see more about that in the future as we explore different possibilities with Cowboy. We are responding with a straight-forward `Hello World\n`. So, our content-type is `text/plain`. This becomes the second argument in the `cowboy_req:reply/4` function.
+
+```
+def headers, do: [{"content-type", "text/plain"}]
+```
+
+Next, we insert the `body` that we are responding with. Once again, it is a simple text message to reach out and say hello:
+
+```
+def body, do: "Hello World\n"
+```
+
+The finished response, when run, should end up looking something like this:
+
+```
+HTTP/1.1 200 OK
+connection: keep-alive
+server: Cowboy
+date: Fri, 13 Mar 2015 23:51:44 GMT
+content-length: 12
+content-type: text/plain
+
+Hello World
+```
+
+As far as our code is concerned, we are finished. We have seen how and why we need the pieces that we have written. However, there is still some pieces left to the request/response lifecycle. So, we haven't quite completed this example. Now, we need to find out how we build that response.
+
+We are passing these three arguments into the `cowboy_req:reply/4` function along with the original request:
+
+```
+def build_reply(request) do
+	:cowboy_req.reply(status_code(), headers(), body(), request)
+end
+```
+
+In practice, that function call is going to look something like this:
+
+```
+def build_reply(request) do
+	:cowboy_req.reply(200, [{"content-type", "text/plain"}], "Hello World\n", {:http_req, #Port<0.5620>, :ranch_tcp, :keepalive, #PID<0.252.0>, "GET", :"HTTP/1.1", {{127, 0, 0, 1}, 62500}, "localhost", :undefined, 4000, "/", :undefined, "", [], [{"user-agent", "curl/7.30.0"}, {"host", "localhost:4000"}, {"accept", "*/*"}], [], :waiting, "", :undefined, false, :waiting, [], "", :undefined})
+end
+```
+
+As you can see, I decided to include what the `request` variable looks like. This may help provide a little bit more clarity rather than simply looking at it as another variable. Inspecting a variable helps me better understand what is going on behind the scenes.
+
+So, how is the `cowboy_req` module turning that into the formatted reply that we see above? Here is the `cowboy_req:reply/4` function:
+
+```
+-spec reply(cowboy:http_status(), cowboy:http_headers(),
+	iodata() | {non_neg_integer() | resp_body_fun()}, Req)
+	-> Req when Req::req().
+reply(Status, Headers, Body, Req=#http_req{
+		socket=Socket, transport=Transport,
+		version=Version, connection=Connection,
+		method=Method, resp_compress=Compress,
+		resp_state=RespState, resp_headers=RespHeaders})
+		when RespState =:= waiting; RespState =:= waiting_stream ->
+	HTTP11Headers = if
+		Transport =/= cowboy_spdy, Version =:= 'HTTP/1.1' ->
+			[{<<"connection">>, atom_to_connection(Connection)}];
+		true ->
+			[]
+	end,
+	Req3 = case Body of
+		BodyFun when is_function(BodyFun) ->
+			%% We stream the response body until we close the connection.
+			RespConn = close,
+			{RespType, Req2} = if
+				Transport =:= cowboy_spdy ->
+					response(Status, Headers, RespHeaders, [
+						{<<"date">>, cowboy_clock:rfc1123()},
+						{<<"server">>, <<"Cowboy">>}
+					], stream, Req);
+				true ->
+					response(Status, Headers, RespHeaders, [
+						{<<"connection">>, <<"close">>},
+						{<<"date">>, cowboy_clock:rfc1123()},
+						{<<"server">>, <<"Cowboy">>},
+						{<<"transfer-encoding">>, <<"identity">>}
+					], <<>>, Req)
+			end,
+			if	RespType =/= hook, Method =/= <<"HEAD">> ->
+					BodyFun(Socket, Transport);
+				true -> ok
+			end,
+			Req2#http_req{connection=RespConn};
+		{chunked, BodyFun} ->
+			%% We stream the response body in chunks.
+			{RespType, Req2} = chunked_response(Status, Headers, Req),
+			if	RespType =/= hook, Method =/= <<"HEAD">> ->
+					ChunkFun = fun(IoData) -> chunk(IoData, Req2) end,
+					BodyFun(ChunkFun),
+					%% Send the last chunk if chunked encoding was used.
+					if
+						Version =:= 'HTTP/1.0'; RespState =:= waiting_stream ->
+							Req2;
+						true ->
+							last_chunk(Req2)
+					end;
+				true -> Req2
+			end;
+		{ContentLength, BodyFun} ->
+			%% We stream the response body for ContentLength bytes.
+			RespConn = response_connection(Headers, Connection),
+			{RespType, Req2} = response(Status, Headers, RespHeaders, [
+					{<<"content-length">>, integer_to_list(ContentLength)},
+					{<<"date">>, cowboy_clock:rfc1123()},
+					{<<"server">>, <<"Cowboy">>}
+				|HTTP11Headers], stream, Req),
+			if	RespType =/= hook, Method =/= <<"HEAD">> ->
+					BodyFun(Socket, Transport);
+				true -> ok
+			end,
+			Req2#http_req{connection=RespConn};
+		_ when Compress ->
+			RespConn = response_connection(Headers, Connection),
+			Req2 = reply_may_compress(Status, Headers, Body, Req,
+				RespHeaders, HTTP11Headers, Method),
+			Req2#http_req{connection=RespConn};
+		_ ->
+			RespConn = response_connection(Headers, Connection),
+			Req2 = reply_no_compress(Status, Headers, Body, Req,
+				RespHeaders, HTTP11Headers, Method, iolist_size(Body)),
+			Req2#http_req{connection=RespConn}
+	end,
+	Req3#http_req{resp_state=done, resp_headers=[], resp_body= <<>>}.
+```
+
+It looks like a lot but there is only a small portion that concerns us. Our current example is rather simple. The relevant pieces of code for us are:
+
+```
+-spec reply(cowboy:http_status(), cowboy:http_headers(),
+	iodata() | {non_neg_integer() | resp_body_fun()}, Req)
+	-> Req when Req::req().
+reply(Status, Headers, Body, Req=#http_req{
+		socket=Socket, transport=Transport,
+		version=Version, connection=Connection,
+		method=Method, resp_compress=Compress,
+		resp_state=RespState, resp_headers=RespHeaders})
+		when RespState =:= waiting; RespState =:= waiting_stream ->
+	HTTP11Headers = if
+		Transport =/= cowboy_spdy, Version =:= 'HTTP/1.1' ->
+			[{<<"connection">>, atom_to_connection(Connection)}];
+		true ->
+			[]
+	end,
+	Req3 = case Body of
+		.
+		.
+		.
+		_ ->
+			RespConn = response_connection(Headers, Connection),
+			Req2 = reply_no_compress(Status, Headers, Body, Req,
+				RespHeaders, HTTP11Headers, Method, iolist_size(Body)),
+			Req2#http_req{connection=RespConn}
+	end,
+	Req3#http_req{resp_state=done, resp_headers=[], resp_body= <<>>}.
+```
+
+This is not as daunting as the original code block. A key point is the form of the request. In this function it is being used according to a `record` specification for the `cowboy_req` module. The `record` definition is at the top of the file:
+
+```
+-record(http_req, {
+	%% Transport.
+	socket = undefined :: any(),
+	transport = undefined :: undefined | module(),
+	connection = keepalive :: keepalive | close,
+
+	%% Request.
+	pid = undefined :: pid(),
+	method = <<"GET">> :: binary(),
+	version = 'HTTP/1.1' :: cowboy:http_version(),
+	peer = undefined :: undefined | {inet:ip_address(), inet:port_number()},
+	host = undefined :: undefined | binary(),
+	host_info = undefined :: undefined | cowboy_router:tokens(),
+	port = undefined :: undefined | inet:port_number(),
+	path = undefined :: binary(),
+	path_info = undefined :: undefined | cowboy_router:tokens(),
+	qs = undefined :: binary(),
+	bindings = undefined :: undefined | cowboy_router:bindings(),
+	headers = [] :: cowboy:http_headers(),
+	meta = [] :: [{atom(), any()}],
+
+	%% Request body.
+	body_state = waiting :: waiting | done | {stream, non_neg_integer(),
+		transfer_decode_fun(), any(), content_decode_fun()},
+	buffer = <<>> :: binary(),
+	multipart = undefined :: undefined | {binary(), binary()},
+
+	%% Response.
+	resp_compress = false :: boolean(),
+	resp_state = waiting :: locked | waiting | waiting_stream
+		| chunks | stream | done,
+	resp_headers = [] :: cowboy:http_headers(),
+	resp_body = <<>> :: iodata() | resp_body_fun()
+		| {non_neg_integer(), resp_body_fun()}
+		| {chunked, resp_chunked_fun()},
+
+	%% Functions.
+	onresponse = undefined :: undefined | already_called
+		| cowboy:onresponse_fun()
+}).
+```
+
+I find it helpful to look at this `record`. It gives me a feeling for what we are dealing with and what data types are expect for each attribute. Granted, we aren't manipulating this `record` in our current example, but I still find it enlightening to take a peek. 
+
+The first step in building a reply is to set our `HTTP11Headers`, the HTTP 1.1 Headers. Since we are not working with `SPDY` and our HTTP version is `1.1`, we will be setting our `connection` header to either "keep-alive" or "close":
+
+```
+HTTP11Headers = if
+		Transport =/= cowboy_spdy, Version =:= 'HTTP/1.1' ->
+			[{<<"connection">>, atom_to_connection(Connection)}];
+		true ->
+			[]
+	end,
+	.
+	.
+	.
+```
+
+The `atom_to_connection/1` function is further down the page. It turns the `Connection` variable into a string:
+
+```
+-spec atom_to_connection(keepalive) -> <<_:80>>;
+						(close) -> <<_:40>>.
+atom_to_connection(keepalive) ->
+	<<"keep-alive">>;
+atom_to_connection(close) ->
+	<<"close">>.
+```
+
+In our case, the `Connection` status will be `keepalive` at this point. Hence, `HTTP11Headers` will look as follows:
+
+```
+[{"connection", "keep-alive"}]
+```
+
+We then move on to the catch-all for the `case` statement:
+
+```
+RespConn = response_connection(Headers, Connection),
+Req2 = reply_no_compress(Status, Headers, Body, Req, RespHeaders, HTTP11Headers, Method, iolist_size(Body)),
+Req2#http_req{connection=RespConn}
+```
+
+The `response_connection/2` function is checked to see if we are manually setting the `connection` header. The function call will look like this:
+
+```
+response_connection([{"content-type", "text/plain"}], keepalive)
+```
+
+This function won't actually make any changes in our case. Since we haven't included a second tuple in the `Header` variable for the `connection`, `response_connection` will cycle through the `Header` variable list and return `keepalive`. The function looks like this:
+
+```
+-spec response_connection(cowboy:http_headers(), keepalive | close)
+	-> keepalive | close.
+response_connection([], Connection) ->
+	Connection;
+response_connection([{Name, Value}|Tail], Connection) ->
+	case Name of
+		<<"connection">> ->
+			Tokens = cow_http_hd:parse_connection(Value),
+			connection_to_atom(Tokens);
+		_ ->
+			response_connection(Tail, Connection)
+	end.
+```
+
+Hence, the only iteration through this last function will match `Name` to `content-type` and `Value` to `text/plain`. But, `Name` will not then match `<<"connection">>`. So, we will call the function again in a recursive manner, as follows:
+
+```
+response_connection([], keepalive)
+```
+
+This is match the first `response_connection/2` function and return `keepalive`. Thus, we will move onto the `reply_no_compress/8` function. I will not go through this function line-by-line. The function is building the lines that we see in the end HTTP response and returns `Req2` variable:
+
+```
+reply_no_compress(Status, Headers, Body, Req,
+		RespHeaders, HTTP11Headers, Method, BodySize) ->
+	{_, Req2} = response(Status, Headers, RespHeaders, [
+			{<<"content-length">>, integer_to_list(BodySize)},
+			{<<"date">>, cowboy_clock:rfc1123()},
+			{<<"server">>, <<"Cowboy">>}
+		|HTTP11Headers],
+		case Method of <<"HEAD">> -> <<>>; _ -> Body end,
+		Req),
+	Req2.
+```
+
+The key to the action in this case is the `response/6`, whose code is here:
+
+```
+-spec response(cowboy:http_status(), cowboy:http_headers(),
+	cowboy:http_headers(), cowboy:http_headers(), stream | iodata(), Req)
+	-> {normal | hook, Req} when Req::req().
+response(Status, Headers, RespHeaders, DefaultHeaders, Body, Req=#http_req{
+		socket=Socket, transport=Transport, version=Version,
+		pid=ReqPid, onresponse=OnResponse}) ->
+	FullHeaders = case OnResponse of
+		already_called -> Headers;
+		_ -> response_merge_headers(Headers, RespHeaders, DefaultHeaders)
+	end,
+	Body2 = case Body of stream -> <<>>; _ -> Body end,
+	{Status2, FullHeaders2, Req2} = case OnResponse of
+		already_called -> {Status, FullHeaders, Req};
+		undefined -> {Status, FullHeaders, Req};
+		OnResponse ->
+			case OnResponse(Status, FullHeaders, Body2,
+					%% Don't call 'onresponse' from the hook itself.
+					Req#http_req{resp_headers=[], resp_body= <<>>,
+						onresponse=already_called}) of
+				StHdReq = {_, _, _} ->
+					StHdReq;
+				Req1 ->
+					{Status, FullHeaders, Req1}
+			end
+	end,
+	ReplyType = case Req2#http_req.resp_state of
+		waiting when Transport =:= cowboy_spdy, Body =:= stream ->
+			cowboy_spdy:stream_reply(Socket, status(Status2), FullHeaders2),
+			ReqPid ! {?MODULE, resp_sent},
+			normal;
+		waiting when Transport =:= cowboy_spdy ->
+			cowboy_spdy:reply(Socket, status(Status2), FullHeaders2, Body),
+			ReqPid ! {?MODULE, resp_sent},
+			normal;
+		RespState when RespState =:= waiting; RespState =:= waiting_stream ->
+			HTTPVer = atom_to_binary(Version, latin1),
+			StatusLine = << HTTPVer/binary, " ",
+				(status(Status2))/binary, "\r\n" >>,
+			HeaderLines = [[Key, <<": ">>, Value, <<"\r\n">>]
+				|| {Key, Value} <- FullHeaders2],
+			ok = Transport:send(Socket, [StatusLine, HeaderLines, <<"\r\n">>, Body2]),
+			ReqPid ! {?MODULE, resp_sent},
+			normal;
+		_ ->
+			hook
+	end,
+	{ReplyType, Req2}.
+```
+
+
+And, the key to the `response/6` function is the following lines:
+
+```
+RespState when RespState =:= waiting; RespState =:= waiting_stream ->
+			HTTPVer = atom_to_binary(Version, latin1),
+			StatusLine = << HTTPVer/binary, " ",
+				(status(Status2))/binary, "\r\n" >>,
+			HeaderLines = [[Key, <<": ">>, Value, <<"\r\n">>]
+				|| {Key, Value} <- FullHeaders2],
+			ok = Transport:send(Socket, [StatusLine, HeaderLines, <<"\r\n">>, Body2]),
+			ReqPid ! {?MODULE, resp_sent},
+			normal;
+```
+
+This is the heart of it all! It is here that we are actually composing the HTTP response of:
+
+```
+HTTP/1.1 200 OK
+connection: keep-alive
+server: Cowboy
+date: Sat, 14 Mar 2015 00:51:16 GMT
+content-length: 12
+content-type: text/plain
+
+Hello World
+```
+
+This message is then sent to `ranch_tcp` with the following command:
+
+```
+Transport:send(Socket, [StatusLine, HeaderLines, <<"\r\n">>, Body2])
+```
+
+In our case `Transport` is a variable whose value is `ranch_tcp`. Thus, all of our journey to this point culminates is the following function: `ranch_tcp:send/2`:
+
+```
+-spec send(inet:socket(), iodata()) -> ok | {error, atom()}.
+send(Socket, Packet) ->
+	gen_tcp:send(Socket, Packet).
+```
+
+We have literally made it from the original TCP connection to the final response! Pretty thrilling, huh!! One of the moments that I love when investigating code is stripping the mystery away. What starts as numerous layers of abstraction, finishes with a really basic TCP `send` function. 
+
+We end up returning a tuple that looks like `{ReplyType, Req2}` from the `response/6` function. The `Req2` variable is bound to the `Req2` variable in the `reply_no_compress/8` function. The `Req2` variable is then bound to the `Req3` variable in our main `reply/4` function and some clean up values on the `Req3` record are set before the function returns:
+
+```
+Req3#http_req{resp_state=done, resp_headers=[], resp_body= <<>>}.
+```
+
+Now, we start the long journey back up the stack where we came from! I won't cover that at this point. h
+

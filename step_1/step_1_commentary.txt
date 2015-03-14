@@ -1,0 +1,273 @@
+The documentation for Plug is quite bad. Yes, there is a basic example but there is little else in the way of direction about how to properly use the functionality contained within. However, it appears to be in use by all of the web frameworks that are currently in development for Elixir. That is most certainly a disconnect. So, I decided to write a small commentary on my investigation into figuring out how Plug works. Granted, I am neither an expert nor a genius. In fact, I'm certainly not a programming wizard. I'm nothing other than a simple guy who like to write code and build products. Hence, if there are any epiphanies that you experience while reading this, they are definitely not due to me.
+
+The basic installation of Plug is easy. It is similar to any other Elixir dependency. Hence, the set up is pretty straight forward if you are used to Elixir. The installation steps can be see on Plug's Github page: https://github.com/elixir-lang/plug
+
+Next, I ran:
+
+~$ mix deps.get
+~$ mix deps.compile
+
+This grabs the required dependencies from the inter-web and then compiles the dependencies so they are ready to go. The first step is necessary (i.e. `mix deps.get`) whereas the second will happen the first time you run `iex -S mix` within the `plug_play` directory. If you have any questions, what the accompanying videos for a better idea of the various steps. I will gloss over some of the steps in the commentary because you will be able to see them in the video. So, if you feel as though you are missing a step, please check out the video walk-through.
+
+The next step is to write our first example for Plug. Because there is a suggestion on the Plug Github page, we will start there. Hence, if you open `lib/plug_play.ex` you will see the relevant code. Most of the code is straight from the first example on Plug's Github page. However, I have added a convenience:
+
+def start_server(port \\ 4000) do
+	{:ok, pid} = Plug.Adapters.Cowboy.http __MODULE__, [], port: port
+	IO.puts "Server running on port: #{port}, with PID: #{inspect pid}"
+end
+
+The `start_server/1` function simply saves us some typing when we start the server in `IEX`. It prints a basic message to the screen in order to inform us what is going on. With most servers in other languages, we would need to run a loop that would take up a terminal window. In Elixir, we don't need to worry about that because we are spawning a separate process when we call the `Plug.Adapters.Cowboy.http/3` function. Hence, we can use `IEX` to spawn the process and continue using the `IEX` session. This is the beauty of Elixir and Erlang's reliance on the Actor Model of concurrency. Starting Cowboy is key action taking place here. So, we will come back to that. In the meantime, a worthwhile point to notice is the addition of a `port` option to the `Plug.Adapters.Cowboy.http/3` function. This option is not overtly mentioned on the Github page, but it is shown in the documentation http://hexdocs.pm/plug/Plug.Adapters.Cowboy.html#http/3 . It comes in handy when you want to run Cowboy in production, where you will need to run it on port 80, the default port for web browsers. 
+
+Another item to notice is the use of the `__MODULE__` function. This is an built-in function for Elixir. It returns the current Module's name (http://elixir-lang.org/docs/stable/elixir/Kernel.SpecialForms.html#__MODULE__/0). The `Cowboy.http/3` function needs to know the module it is look at for instructions. In this case, there is only one module, so it is easy. If we needed to specify the module explicitly, we would say:
+
+{:ok, pid} = Plug.Adapters.Cowboy.http PlugPlay, [], port: port
+
+Now, we will focus on the example itself. The first line that we see is `import Plug.Conn`. We are simply importing the `Plug.Conn` module into the current one. By doing so, we can simply write:
+
+put_resp_content_type("text/plain")
+
+rather than writing the complete reference of:
+
+Plug.Conn.put_resp_content_type("text/plain")
+
+It makes our life a little easier.
+
+The other 2 functions in the module are the following:
+
+def init(options) do
+	options
+end
+
+def call(conn, _opts) do
+	conn
+	|> put_resp_content_type("text/plain")
+	|> send_resp(200, "Hello World")
+end
+
+At first site, there is no indication as to what is going on here. Nor is there any deep explanation of how this is expected to work. We find a little bit more information about what is going on here in the docs for the `Plug` module: http://hexdocs.pm/plug/Plug.html#call/2. It appears as though there are 2 variations of plugs, a function plug and a module plug. Of course, that begs the question: "what is a plug?" Long story short...I still don't know. My initial impression was that it was a CS term that I didn't know but a Google search didn't turn up anything. Hence, all I can think is that `plug` is a term unique to this library. Unfortunately, I feel as though it only adds confusion rather than clarity. Due to the lack of a proper definition, it is unclear what is really being spoken of.
+
+When we dig into `plug.ex`, we start to get an inkling of what is going on. Both `init/0` and `call/2` are `behaviours`. Hence, they are expected parts of any `module plug` that we are defining. As Dave Thomas says in his wonderful book, Programming Elixir: "An Elixir Behvaviour is nothing more than a list of functions. A module that declares that it implements a particular behaviour must implement all of the associated functions. If it doesn't, Elixir will generate a compilation warning."
+
+Unfortunately, I don't feel as though this provides any clearer example of what is actually going on with Plug. When we use Plug, we are expected to have both the `init/1` function and the `call/2` function. But why? The key here may be to start backwards.
+
+We are passing the `PlugPlay` module into the `Plug.Adapters.Cowboy.http/3` function. Hence, I'm assuming that it is that function that is then looking for the `init/1` and `call/2` function within the `PlugPlay` module. It may be worth seeing what is going on with the `Plug.Adapters.Cowboy.http/3` function. We find the following at https://github.com/elixir-lang/plug/blob/master/lib/plug/adapters/cowboy.ex :
+
+@spec http(module(), Keyword.t, Keyword.t) :: {:ok, pid} | {:error, :eaddrinuse} | {:error, term}
+def http(plug, opts, options \\ []) do
+	run(:http, plug, opts, options)
+end
+
+Clearly, all that is being done with the `http/3` function is that it acts as a wrapper around the `run/4` function and adds the `:http` atom as the first argument in that function. So, what let's look at the `run/4` function:
+
+defp run(scheme, plug, opts, options) do
+	Application.ensure_all_started(:cowboy)
+	apply(:cowboy, :"start_#{scheme}", args(scheme, plug, opts, options))
+end
+
+Here, it looks like we are getting to the connection point with the Cowboy library. The first function that we run is a standard Elixir function to ensure that Cowboy has properly started. Then, we call the `apply/3` function, which is part of the Elixir Kernel (http://elixir-lang.org/docs/stable/elixir/Kernel.html#apply/3). `apply/3` simply invokes the given function within the specified module with an array of arguments. In the present case, the module that we want to work with is `:cowboy`, the function call we are making is for `:start_http` and the array of arguments is `args(scheme, plug, opts, options)`. So, now we've got a couple of different things to look for. Since it is in the current module, we will start with the `args/4` function. We find it at the top of the code for the `Plug.Adapters.Cowboy` module:
+
+def args(scheme, plug, opts, options) do
+	options
+	|> Keyword.put_new(:ref, build_ref(plug, scheme))
+	|> Keyword.put_new(:dispatch, options[:dispatch] || dispatch_for(plug, opts))
+	|> normalize_options(scheme)
+	|> to_args()
+end
+
+There is a lot going on in this function. However, I feel as though we are getting closer to where the `options` argument in the `init/1` function is coming from. If we adapt the above function definition to what it will look like in our current usage, we would see the following:
+
+args(:http, PlugPlay, [], [port: 4000])
+
+Notice how we passed in `port: 4000` as an argument in `Plug.Adapters.Cowboy.http/3` and it came out looking like `[port: 4000]`. It is a keyword list and this is simply its natural behavior. If we had more than one option to pass in we would need to wrap it in brackets, `[port: 4000, random: "thing"]`. Now back to the `args/4` function. 
+
+In general we are building a big Keyword list in the `args/4` function. Or at least that is what it looks like at first glance. Let's find out if that is really the case. As a side point, I will say that it is in moments like that that I really wish that you were forced to express the output value for an Elixir function. In fact, this is a good example of where using a `@spec` would likely be a good idea so that we know exactly what this function is going to give us. First off, let's find out what is going on.
+
+We are starting by passing the `options` argument into a serious of functions. We start with `Keyword.put_new/3`. This is a function that is part of the Elixir standard library (http://elixir-lang.org/docs/stable/elixir/Keyword.html#put_new/3) and will look like this in our current case:
+
+Keyword.put_new([port: 4000], :ref, build_ref(PlugPlay, :http))
+
+Generally, we can intuit that we want the output of this function to be something like:
+
+[port: 4000, ref: "cool guy"]
+
+In other words, we are simply adding a `:ref` keyword to the list and we are building the value for `:ref` with the `build_ref/2` function. So, where is the `build_ref/2` function? We find that a little bit further down the page:
+
+defp build_ref(plug, scheme) do
+	Module.concat(plug, scheme |> to_string |> String.upcase)
+end
+
+`Module.concat/2` is found in the standard library (http://elixir-lang.org/docs/stable/elixir/Module.html#concat/2). Basically, we want to build a valid Module name. Hence, the example given in the documentation is:
+
+iex> Module.concat(Foo, "Bar")
+Foo.Bar
+
+Thus, in our case we are calling the function like this:
+
+Module.concat(PlugPlay, :http |> to_string |> String.upcase)
+
+And, we will end up with the following:
+
+PlugPlay.HTTP
+
+Thus, our main function looks like this:
+
+Keyword.put_new([port: 4000], :ref, PlugPlay.HTTP)
+
+And outputs:
+
+[port: 4000, ref: PlugPlay.HTTP]
+
+We are then passing that into another `Keyword.put_new/3` function call and getting this:
+
+Keyword.put_new([port: 4000, ref: PlugPlay.HTTP], :dispatch, options[:dispatch] || dispatch_for(PlugPlay, []))
+
+Again, we are adding another keyword to the list. This time we are adding a `dispatch` keyword and its value. If we have entered a dispatch option in our `Plug.Adapters.Cowboy.http/3` function, we would use that as a value. However, we haven't entered a `options[:dispatch` value so the function call looks as follows:
+
+Keyword.put_new([port: 4000, ref: PlugPlay.HTTP], :dispatch, nil || dispatch_for(PlugPlay, []))
+
+In other words, since we have `nil` for `options[:dispatch]` we will move on to the `dispatch_for(PlugPlay, [])` function call. We find the `dispatch_for/2` function just below the `build_ref/2` function in the Plug code:
+
+defp dispatch_for(plug, opts) do
+	opts = plug.init(opts)
+	[{:_, [{:_, Plug.Adapters.Cowboy.Handler, {plug, opts}} ]} ]
+end
+
+Look!!! We've finally arrived at our `PlugPlay.init/1` function!!! Now, we see why it is necessary to have use the Behavior functionality in Elixir. We need to be certain that our module has a `init/1` function so this function is available for the `dispatch_for/2` function in the `Plug.Adapters.Cowboy` module. 
+
+All that we are doing when we run our `PlugPlay.init/1` function is being given the `opts` that we passed in right back. After all, our `PlugPlay.init/1` function is simply:
+
+def init(options) do
+	options
+end
+
+We are then using that return value to build our value for the `dispatch` keyword in our main list that we are building. Thus the return value of `dispatch_for/2` looks as follows in our particular case:
+
+	[{:_, [{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}} ]} ]
+
+Thus, our parent function looks as follows:
+
+Keyword.put_new([port: 400, ref: PlugPlay.HTTP], :dispatch, nil || [{:_, [{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]}] )
+
+We are adding that result of `dispatch_for/2` into our keyword list that we are building. The next step is to pass that keyword list into the `normalize_options/2` function. Out call to the `normalize_options/2` function looks as follows:
+
+normalize_options([port: 4000, ref: PlugPlay.HTTP, dispatch: [{:_, [{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}} ]} ] ], :http)
+
+Our function call will match the following `normalize_options/2` function:
+
+defp normalize_options(options, :http) do
+	Keyword.merge @http_options, options
+end
+
+The `@http_options` simply gives us the following keyword list:
+
+[port: 4000]
+
+We are passing this and our `options` keyword list into the `Keyword.merge/2` function (http://elixir-lang.org/docs/stable/elixir/Keyword.html#merge/2). This will remove any duplicates in the keyword lists and the keywords passed in as the second argument will take precedence. Hence, our `options` keyword list won't change. However, if we had set the port to 80, or something else, in our `options` keyword list, then that would become the `port` keyword value and we would get rid of the `@http_options` value of `4000`.
+
+Next, we are finally passing our keyword list into the `to_args/1` function. It is within the `to_args/1` function that we appear to be producing the final product that will result in the argument that we will provide to the Cowboy `start_http` function. (Notice how I didn't put an arity specification on the `start_http` reference. I'm not sure what the proper arity is at the moment. For that, we would need to go to the Cowboy docs. If we look at Cowboy's docs we see that we need an arity of 4. http://ninenines.eu/docs/en/cowboy/HEAD/manual/cowboy/). We will need an array of 4 arguments to pass to the `start_http/4` function; an array is specified for the `Kernel.apply/3` function from the Elixir standard library. To arrive there the `to_args/1` function looks as follows:
+
+defp to_args(options) do
+	ref = options[:ref]
+	acceptors = options[:acceptors] || 100
+	dispatch = :cowboy_router.compile(options[:dispatch])
+	compress = options[:compress] || false
+	options = Keyword.drop(options, @not_options)
+	[ref, acceptors, options, [env: [dispatch: dispatch], compress: compress]]
+end
+
+Once again, it doesn't look like we are doing anything shocking in this function. The first two lines are completely straight-forward. The third line is where there is a little bit of magic seeming to happen. Technically speaking this is our first real entry point for Cowboy since the `:cowboy_router.compile/1` function is called before the `:cowboy.start_http/4` function. In some sense, everything that happened before this is simply a sugar coating around two Cowboy functions (i.e. `start_http/4` and `:cowboy_router.compile/1`). So, let's dive into the `:cowboy.compile/1` function. The code is found here: https://github.com/ninenines/cowboy/blob/master/src/cowboy_router.erl; our first entry point is the following function:
+
+compile(Routes) ->
+	compile(Routes, []).
+
+compile([], Acc) ->
+	lists:reverse(Acc);
+compile([{Host, Paths} | Tail], Acc) ->
+	compile([{Host, [], Paths} | Tail], Acc);
+compile([{HostMatch, Fields, Paths} | Tail], Acc) ->
+	HostRules = case HostMatch of
+		'_' -> '_';
+		_ -> compile_host(HostMatch)
+	end,
+	PathRules = compile_paths(Paths, []),
+	Hosts = case HostRules of
+		'_' -> [{'_', Fields, PathRules}];
+		_ -> [{R, Fields, PathRules} || R <- HostRules]
+	end,
+	compile(Tail, Hosts ++ Acc).
+
+The `compile/1` function is a convenience function that initializes the `compile/2` function with an empty list that will act as the accumulator for the `compile/2` function. The first portion of the `compile/2` function we see is the exit point from the recursive function:
+
+compile([], Acc) ->
+	lists:reverse(Acc);
+
+In Elixir we could translate this to:
+
+def compile([], acc) do
+	Enum.reverse(acc)
+end
+
+Then, we have the core of the `compile/2` function. First, it is worth remembering what the item we are passing in looks like:
+
+	[{:_, [{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}} ]} ]
+
+In other words, this would match our first `compile/2` function, which is matching for the head of a list where the head of the list is a tuple with 2 element. In our case, the first element is `:_` and the second is `[{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]`. Notice, that all we are doing in this case is adding an empty array and passing it back to the `compile/2` function:
+
+compile([{Host, Paths} | Tail], Acc) ->
+	compile([{Host, [], Paths} | Tail], Acc);
+
+We then run the result of the above function back through `compile/2` but, this time, it will be matched to the third option. The actual arguments will look something like the following:
+
+compile([{:_, [], [{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]} | []], []) ->
+	HostRules = case HostMatch of
+		'_' -> '_';
+		_ -> compile_host(HostMatch)
+	end,
+
+
+As we can see, the first portion of this function will return `'_'` because, in Erlang, the `:_` option matches the first case. The next steps is compiling the paths:
+
+	PathRules = compile_paths(Paths, [])
+
+In fact, I'm not going to go in depth into that method because the end result is not much different than what we pass in, which looks as follows:
+
+	PathRules = compile_paths([{:_, Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}], [])
+
+For this particular case, we are really just adding an empty list as an element in the tuple. Hence, the result is:
+
+	[{:_, [], Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]
+
+In fact, the end result of the `compile/2` is not that much different. All that we have really done is add in empty lists as the second elements in the tuples. The results look like:
+
+[{:_, [], [{:_, [], Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]}]
+
+In some sense, this is a little disappointing. I was hoping to find out what we are doing with the `call/2` in our `PlugPlay` module. However, I still haven't found that answer yet. The `compile/2` function in `:cowboy_router` doesn't really do a whole lot other than format our `dispatch` options in a manner that is suitable for Cowboy's router's needs.
+
+Since we didn't find the answer to our `call/2` function, we will continue the investigation. Before hopping into Cowboy, we were looking at the `to_args/1` function in the `Plug.Adapters.Cowboy` module. Just to rehash where we were at, I will reiterate the function:
+
+defp to_args(options) do
+	ref = options[:ref]
+	acceptors = options[:acceptors] || 100
+	dispatch = :cowboy_router.compile(options[:dispatch])
+	compress = options[:compress] || false
+	options = Keyword.drop(options, @not_options)
+	[ref, acceptors, options, [env: [dispatch: dispatch], compress: compress]]
+end
+
+Now that we have the result of the `:cowboy_router.compile/1` function, we move on to assigning the `compress` variable. Next, we move on to making sure that there aren't any unneeded options in our `options` list. Hence, we use the `Keyword.drop/2` function to get rid of any unneeded keywords; its docs can be found at http://elixir-lang.org/docs/stable/elixir/Keyword.html#drop/2. The `@not_options` attribute is as follows:
+
+@not_options [:acceptors, :dispatch, :ref, :otp_app, :compress]
+
+From looking at the list of options that we want to drop, I'm questioning why we spent the effort to build these options and then drop them. If we didn't need the `dispatch` and `ref` keywords to be part of the final `options` keyword list, why go through the hassle of putting them in there only to consider them useless a few lines later? It might be worth coming back and refactoring this code a bit. However, we haven't looked at the `https` version of this flow, so there may be a small difference.
+
+Now, we finally have the arguments that we are going to be passing to `:cowboy.start_http/4`. The result of the `to_args/1` function will look as follows in our case:
+
+[PlugPlay.HTTP, 100, [port: 4000], [env: [dispatch: [{:_, [], [{:_, [], Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]}] ], compress: false]]
+
+It is here that we are finally returning to `run/4` function where we are now calling the following `apply` function:
+
+apply(:cowboy, :"start_http", [PlugPlay.HTTP, 100, [port: 4000], [env: [dispatch: [{:_, [], [{:_, [], Plug.Adapters.Cowboy.Handler, {PlugPlay, []}}]}] ], compress: false]])
+
+Once again, we are entering into Cowboy's territory. However, we still haven't seen the `call/2` function from our original module. The reality is that we are going to need to dive into the basics of Cowboy in order to truly understand what is going on with Plug and how we can use it best. Normally, I would hate to finish any section of a walkthrough without fully explaining the program, but it seems necessary since it is unclear how long it will take to figure out how deep we have to go before we understand where `call/2` comes into play.
+
+I know that this program works. So, now, it is simply a matter of figuring out why it works. Based on what we've seen so far, it looks necessary to step back before we can move forward. Thus, we must move forward with a little bit of trust that the creators of Plug have created a logical connection point with Cowboy such that we can clearly see how to take what we learn and expand significantly upon that in order to use confidently use Plug.
