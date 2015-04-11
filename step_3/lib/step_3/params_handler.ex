@@ -15,13 +15,13 @@ defmodule Step_3.ParamsHandler do
   end
 
   def build_reply(request, msg) do
-    :cowboy_req.reply(status_code(), headers(), body(msg), request)
+    :cowboy_req.reply(status_code(), headers(), body([message: msg]), request)
   end
 
   def status_code, do: 200
   def headers, do: [{"content-type", "text/html"}]
 
-  def body(msg) do
-    EEx.eval_file("templates/index.html.ex", assigns: [message: msg])
+  def body(params) do
+    EEx.eval_file("templates/index.html.ex", assigns: params)
   end
 end
